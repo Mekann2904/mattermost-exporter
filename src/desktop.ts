@@ -11,11 +11,32 @@ import { Database } from 'bun:sqlite';
 import { existsSync, copyFileSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Mattermost, type Me } from './mattermost';
 
 const APP_SUPPORT = join(homedir(), 'Library/Application Support/Mattermost');
 
-export function isMacosDesktopInstalled(): boolean {
-  return process.platform === 'darwin' && existsSync(join(APP_SUPPORT, 'config.json'));
+/**
+ * Run a read-only query against a private copy of the desktop cookie DB
+ * (the live DB may be locked by the running app).
+ * Returns null when the DB is missing or unreadable.
+ */
+function withCookieDb<T>(fn: (db: Database) => T): T | null {
+  const src = join(APP_SUPPORT, 'Cookies');
+  if (!existsSync(src)) return null;
+  const tmp = join(tmpdir(), `mattermost-exporter-cookies-${process.pid}`);
+  try {
+    copyFileSync(src, tmp);
+    const db = new Database(tmp, { readonly: true });
+    try {
+      return fn(db);
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  } finally {
+    rmSync(tmp, { force: true });
+  }
 }
 
 /** Server URLs registered in the desktop app (supports both config v4 `servers` and legacy `teams`). */
@@ -35,22 +56,12 @@ export function desktopServerList(): string[] {
 
 /** Fallback: hosts that have an MMAUTHTOKEN cookie (straight from the cookie DB). */
 export function cookieServerList(): string[] {
-  const cookiesPath = join(APP_SUPPORT, 'Cookies');
-  if (!existsSync(cookiesPath)) return [];
-  const tmp = join(tmpdir(), `mattermost-exporter-cookies-scan-${process.pid}`);
-  try {
-    copyFileSync(cookiesPath, tmp);
-    const db = new Database(tmp, { readonly: true });
-    const rows = db
-      .query(`SELECT DISTINCT host_key FROM cookies WHERE name='MMAUTHTOKEN'`)
-      .all() as { host_key: string }[];
-    db.close();
-    return rows.map((r) => `https://${r.host_key.replace(/^\./, '')}`);
-  } catch {
-    return [];
-  } finally {
-    rmSync(tmp, { force: true });
-  }
+  const rows = withCookieDb((db) =>
+    db.query(`SELECT DISTINCT host_key FROM cookies WHERE name='MMAUTHTOKEN'`).all() as {
+      host_key: string;
+    }[],
+  );
+  return rows ? rows.map((r) => `https://${r.host_key.replace(/^\./, '')}`) : [];
 }
 
 /** All candidate servers (config + cookies, deduplicated). */
@@ -60,9 +71,7 @@ export function allDesktopServers(): string[] {
 
 function keychainPassword(): string | null {
   try {
-    const r = Bun.spawnSync([
-      'security', 'find-generic-password', '-s', 'Mattermost Safe Storage', '-w',
-    ]);
+    const r = Bun.spawnSync(['security', 'find-generic-password', '-s', 'Mattermost Safe Storage', '-w']);
     const out = r.stdout?.toString().trim();
     return out && r.exitCode === 0 ? out : null;
   } catch {
@@ -81,33 +90,24 @@ export function extractDesktopToken(serverUrl: string): DetectResult | null {
   } catch {
     return { error: 'URLが不正です' };
   }
-  const cookiesPath = join(APP_SUPPORT, 'Cookies');
   if (!existsSync(join(APP_SUPPORT, 'config.json'))) {
     return { error: 'Mattermostデスクトップアプリが見つかりません' };
   }
-  if (!existsSync(cookiesPath)) {
+  if (!existsSync(join(APP_SUPPORT, 'Cookies'))) {
     return { error: 'デスクトップアプリのCookieがありません（一度ログインしてください）' };
   }
 
-  const tmp = join(tmpdir(), `mattermost-exporter-cookies-${process.pid}`);
-  let data: Uint8Array | undefined;
-  try {
-    copyFileSync(cookiesPath, tmp); // DB may be locked by the running app; a copy reads fine
-    const db = new Database(tmp, { readonly: true });
-    const row = db
-      .query(
-        `SELECT encrypted_value FROM cookies WHERE name='MMAUTHTOKEN' AND host_key LIKE ? LIMIT 1`,
-      )
-      .get(`%${host}`) as { encrypted_value?: Uint8Array } | null;
-    db.close();
-    data = row?.encrypted_value ?? undefined;
-  } catch {
-    return { error: 'Cookie DBの読み取りに失敗しました' };
-  } finally {
-    rmSync(tmp, { force: true });
-  }
+  const row = withCookieDb((db) =>
+    db
+      .query(`SELECT encrypted_value FROM cookies WHERE name='MMAUTHTOKEN' AND host_key LIKE ? LIMIT 1`)
+      .get(`%${host}`) as { encrypted_value?: Uint8Array } | null,
+  );
+  if (row === null) return { error: 'Cookie DBの読み取りに失敗しました' };
+  const data = row.encrypted_value;
   if (!data) {
-    return { error: `このサーバー(${host})のセッションCookieがありません。デスクトップアプリでログインしてください` };
+    return {
+      error: `このサーバー(${host})のセッションCookieがありません。デスクトップアプリでログインしてください`,
+    };
   }
   if (data.length < 48) {
     return { error: 'Cookieが短すぎます（デスクトップアプリで再ログインしてください）' };
@@ -134,4 +134,34 @@ export function extractDesktopToken(serverUrl: string): DetectResult | null {
   } catch {
     return { error: '復号中にエラーが発生しました' };
   }
+}
+
+export interface DesktopSession {
+  server: string;
+  client: Mattermost;
+  me: Me;
+}
+
+/**
+ * First desktop-app session that actually verifies against its server,
+ * or the per-server failure reasons when none do.
+ */
+export async function resolveDesktopSession(): Promise<DesktopSession | { errors: string[] }> {
+  const errors: string[] = [];
+  for (const server of allDesktopServers()) {
+    const r = extractDesktopToken(server);
+    if (!r) continue;
+    if ('error' in r) {
+      errors.push(`${server}: ${r.error}`);
+      continue;
+    }
+    const client = new Mattermost(server, r.token);
+    try {
+      const me = await client.me();
+      return { server, client, me };
+    } catch {
+      errors.push(`${server}: セッションが無効です（デスクトップアプリで再ログインしてください）`);
+    }
+  }
+  return { errors };
 }

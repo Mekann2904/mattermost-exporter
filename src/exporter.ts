@@ -1,16 +1,15 @@
 /** Channel export: JSON + attachments. Shared by the TUI and headless modes. */
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Mattermost, Post } from './mattermost';
+import type { Mattermost } from './mattermost';
 
 export interface ExportProgress {
-  phase: 'posts' | 'files' | 'done';
+  phase: 'posts' | 'files';
   postsFetched: number;
   filesDone: number;
   filesTotal: number;
   currentFile?: string;
   bytes: number;
-  error?: string;
 }
 
 export interface ExportSummary {
@@ -22,6 +21,16 @@ export interface ExportSummary {
   bytes: number;
   failedFiles: string[];
   dateRange: { from: string; to: string } | null;
+}
+
+/** Attachments downloaded in parallel. */
+const DOWNLOAD_CONCURRENCY = 4;
+
+export function fmtBytes(n: number): string {
+  if (n > 1024 * 1024 * 1024) return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (n > 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n > 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${n} B`;
 }
 
 function safeName(name: string): string {
@@ -48,9 +57,6 @@ export async function exportChannel(
     onProgress?.({ phase: 'posts', postsFetched: n, filesDone: 0, filesTotal: 0, bytes: 0 }),
   );
   const users = await mm.userNames(posts.map((p) => p.user_id));
-
-  const filePosts = posts.filter((p) => p.file_ids?.length);
-  const fileCount = filePosts.reduce((n, p) => n + p.file_ids.length, 0);
   const names = await mm.fileNameMap(posts);
 
   const payload = {
@@ -63,59 +69,59 @@ export async function exportChannel(
   };
   await Bun.write(join(root, 'channel.json'), JSON.stringify(payload, null, 2));
 
+  // Attachment downloads are independent: run them through a small worker pool.
+  const attachments = posts
+    .filter((p) => p.file_ids.length)
+    .flatMap((p) => p.file_ids.map((fid) => ({ fid, createAt: p.create_at })));
+
   let done = 0;
   let bytes = 0;
   const failed: string[] = [];
-  for (const p of filePosts) {
-    for (const fid of p.file_ids) {
-      const orig = names.get(fid) ?? fid;
-      const path = join(attDir, `${isoDate(p.create_at)}_${fid.slice(0, 8)}_${safeName(orig)}`);
-      onProgress?.({
-        phase: 'files',
-        postsFetched: posts.length,
-        filesDone: done,
-        filesTotal: fileCount,
-        currentFile: orig,
-        bytes,
-      });
+  const report = (currentFile: string | undefined): void =>
+    onProgress?.({
+      phase: 'files',
+      postsFetched: posts.length,
+      filesDone: done,
+      filesTotal: attachments.length,
+      currentFile,
+      bytes,
+    });
+
+  report(undefined);
+  const queue = [...attachments];
+  const downloadNext = async (): Promise<void> => {
+    for (;;) {
+      const item = queue.shift();
+      if (!item) return;
+      const orig = names.get(item.fid) ?? item.fid;
+      const path = join(attDir, `${isoDate(item.createAt)}_${item.fid.slice(0, 8)}_${safeName(orig)}`);
       try {
-        const buf = await mm.download(fid);
+        const buf = await mm.download(item.fid);
         await Bun.write(path, buf);
         bytes += buf.byteLength;
-      } catch (e) {
+      } catch {
         failed.push(orig);
-        void e;
       }
       done++;
+      report(orig);
     }
-  }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, attachments.length) }, () => downloadNext()),
+  );
 
-  const sorted = posts.filter((p: Post) => !p.type?.startsWith('system_'));
-  const summary: ExportSummary = {
+  // posts() returns oldest first; skip system join/leave messages for the date range.
+  const dated = posts.filter((p) => !p.type.startsWith('system_'));
+  return {
     channelName: channel.display_name,
     channelId: channel.id,
     outDir: root,
     postCount: posts.length,
-    fileCount: fileCount - failed.length,
+    fileCount: attachments.length - failed.length,
     bytes,
     failedFiles: failed,
-    dateRange: sorted.length
-      ? {
-          from: isoDate(sorted[0].create_at),
-          to: isoDate(sorted[sorted.length - 1].create_at),
-        }
+    dateRange: dated.length
+      ? { from: isoDate(dated[0].create_at), to: isoDate(dated[dated.length - 1].create_at) }
       : null,
-  };
-  onProgress?.({ ...summaryProgress(summary), phase: 'done' });
-  return summary;
-}
-
-function summaryProgress(s: ExportSummary): ExportProgress {
-  return {
-    phase: 'done',
-    postsFetched: s.postCount,
-    filesDone: s.fileCount,
-    filesTotal: s.fileCount + s.failedFiles.length,
-    bytes: s.bytes,
   };
 }

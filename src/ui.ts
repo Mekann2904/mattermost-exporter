@@ -7,11 +7,12 @@ import {
   InputRenderableEvents,
   SelectRenderableEvents,
   createCliRenderer,
+  type KeyEvent,
 } from '@opentui/core';
 import { Mattermost } from './mattermost';
 import type { Channel } from './mattermost';
-import { exportChannel, type ExportSummary } from './exporter';
-import { desktopServerList, extractDesktopToken, allDesktopServers } from './desktop';
+import { exportChannel, fmtBytes, type ExportSummary } from './exporter';
+import { desktopServerList, resolveDesktopSession } from './desktop';
 
 type Renderer = Awaited<ReturnType<typeof createCliRenderer>>;
 
@@ -55,13 +56,6 @@ function typeBadge(ch: Channel): string {
   return '#';
 }
 
-function fmtBytes(n: number): string {
-  if (n > 1024 * 1024 * 1024) return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
-  if (n > 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  if (n > 1024) return `${(n / 1024).toFixed(0)} KB`;
-  return `${n} B`;
-}
-
 function progressBar(done: number, total: number, width = 36): string {
   if (total <= 0) return '';
   const filled = Math.round((done / total) * width);
@@ -74,10 +68,49 @@ function formatSummary(s: ExportSummary): string {
   }`;
 }
 
+function fuzzyMatch(text: string, query: string): boolean {
+  if (!query) return true;
+  const t = text.toLowerCase();
+  if (t.includes(query)) return true; // substring: always matches
+  // fuzzy: all query chars must appear in order (subsequence)
+  let i = 0;
+  for (const ch of t) {
+    if (ch === query[i]) i++;
+    if (i >= query.length) return true;
+  }
+  return false;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
 export async function runTui(outDir: string): Promise<void> {
   const renderer = await createCliRenderer({ exitOnCtrlC: true });
 
-  const showManual = (initialError?: string): void => {
+  // destroy() tears down renderables but does not stop the process (Ctrl+C / terminating
+  // signals); pending async work would then crash touching destroyed renderables. Exit cleanly.
+  renderer.on('destroy', () => process.exit(0));
+
+  // Global key handlers belong to the current screen and are removed on every transition,
+  // so screens never see each other's keys and nothing accumulates.
+  let keyHandlers: Array<(key: KeyEvent) => void> = [];
+  const onKey = (name: string, fn: (key: KeyEvent) => void): void => {
+    const handler = (key: KeyEvent): void => {
+      if (key.name === name) fn(key);
+    };
+    keyHandlers.push(handler);
+    renderer.keyInput.on('keypress', handler);
+  };
+  const switchScreen = async (screen: () => Promise<void>): Promise<void> => {
+    for (const h of keyHandlers) renderer.keyInput.off('keypress', h);
+    keyHandlers = [];
+    await screen();
+  };
+  const quit = (): void => {
+    renderer.destroy();
+    process.exit(0);
+  };
+
+  const showManual = async (initialError?: string): Promise<void> => {
     clearRoot(renderer);
     const page = frame(renderer, '接続設定');
     if (initialError) page.add(txt(renderer, `⚠ ${initialError}`, C.warn));
@@ -135,7 +168,7 @@ export async function runTui(outDir: string): Promise<void> {
       status.fg = C.warn;
       try {
         const { client, me } = await Mattermost.login(server, loginId, password);
-        await showChannels(client, `${me.username} @ ${server}`);
+        await switchScreen(() => showChannels(client, `${me.username} @ ${server}`));
       } catch (e) {
         status.content = `✗ ログイン失敗: ${e instanceof Error ? e.message.slice(0, 90) : e}`;
         status.fg = C.err;
@@ -163,7 +196,7 @@ export async function runTui(outDir: string): Promise<void> {
     try {
       channels = await client.allChannels();
     } catch (e) {
-      showManual(`✗ チャンネル取得失敗: ${e instanceof Error ? e.message.slice(0, 100) : e}`);
+      await switchScreen(() => showManual(`✗ チャンネル取得失敗: ${e instanceof Error ? e.message.slice(0, 100) : e}`));
       return;
     }
     if (!channels.length) {
@@ -172,27 +205,68 @@ export async function runTui(outDir: string): Promise<void> {
       return;
     }
     channels.sort((a, b) => (b.last_post_at ?? 0) - (a.last_post_at ?? 0));
-    status.content = `✓ ${who} — ${channels.length} チャンネル ↑↓ で移動、Enter でエクスポート、q で終了`;
+
+    const optionOf = (ch: Channel) => ({
+      name: `${typeBadge(ch)} ${ch.display_name || ch.name}`,
+      description: ch.last_post_at
+        ? `最終投稿 ${new Date(ch.last_post_at).toISOString().slice(0, 10)} ・ ${ch.total_msg_count ?? '?'}件`
+        : '投稿なし',
+      value: ch.id,
+    });
+
+    const queryInput = new InputRenderable(renderer, {
+      width: 68,
+      placeholder: '検索… (タイプで絞り込み)',
+      textColor: C.text,
+      focusedBackgroundColor: '#24283B',
+    });
+    page.add(queryInput);
 
     const select = new SelectRenderable(renderer, {
       width: 70,
-      height: 20,
-      options: channels.map((ch) => ({
-        name: `${typeBadge(ch)} ${ch.display_name || ch.name}`,
-        description: ch.last_post_at
-          ? `最終投稿 ${new Date(ch.last_post_at).toISOString().slice(0, 10)} ・ ${ch.total_msg_count ?? '?'}件`
-          : '投稿なし',
-        value: ch.id,
-      })),
+      height: 18,
+      options: channels.map(optionOf),
       showDescription: true,
       showScrollIndicator: true,
     });
-    select.on(SelectRenderableEvents.ITEM_SELECTED, (_index, option) => {
-      const ch = channels.find((c) => c.id === option?.value);
-      if (ch) void showExport(client, ch);
-    });
-    select.focus();
     page.add(select);
+
+    let filtered = channels;
+
+    const applyFilter = (): void => {
+      const q = String(queryInput.value ?? '').trim().toLowerCase();
+      filtered = channels.filter((ch) => fuzzyMatch(`${ch.display_name} ${ch.name}`, q));
+      select.options = filtered.map(optionOf);
+      select.setSelectedIndex(0);
+      status.content = `${filtered.length}/${channels.length} チャンネル — ↑↓ 選択、Enter 決定（入力欄でタイプして絞り込み）`;
+    };
+
+    const confirm = (): void => {
+      const opt = select.getSelectedOption();
+      if (!opt?.value) return;
+      const ch = filtered.find((c) => c.id === opt.value);
+      if (ch) {
+        void switchScreen(() => showExport(client, ch));
+      }
+    };
+
+    queryInput.on(InputRenderableEvents.CHANGE, applyFilter);
+    queryInput.on(InputRenderableEvents.ENTER, confirm);
+    select.on(SelectRenderableEvents.ITEM_SELECTED, confirm);
+
+    // Arrows move the list from here (the input keeps focus); preventDefault stops
+    // a focused Select from also handling the key and double-stepping.
+    onKey('up', (key) => {
+      key.preventDefault();
+      select.moveUp();
+    });
+    onKey('down', (key) => {
+      key.preventDefault();
+      select.moveDown();
+    });
+
+    applyFilter();
+    queryInput.focus();
   };
 
   const showExport = async (client: Mattermost, ch: Channel): Promise<void> => {
@@ -211,7 +285,7 @@ export async function runTui(outDir: string): Promise<void> {
       const summary = await exportChannel(client, ch.id, outDir, (p) => {
         if (p.phase === 'posts') {
           line1.content = `投稿を取得中... ${p.postsFetched}件`;
-        } else if (p.phase === 'files') {
+        } else {
           line1.content = `✓ 投稿 ${p.postsFetched}件を取得済み`;
           line2.content = `添付ファイルをダウンロード中...`;
           line3.content = progressBar(p.filesDone, p.filesTotal);
@@ -225,52 +299,43 @@ export async function runTui(outDir: string): Promise<void> {
         ? `⚠ 失敗: ${summary.failedFiles.join(', ').slice(0, 100)}`
         : '';
       line3.fg = summary.failedFiles.length ? C.warn : C.muted;
-      line4.content = 'q: 終了';
     } catch (e) {
       line1.content = `✗ エクスポート失敗: ${e instanceof Error ? e.message.slice(0, 120) : e}`;
       line1.fg = C.err;
-      line4.content = 'q: 終了';
     }
-    renderer.keyInput.on('keypress', (key) => {
-      if (key.name === 'q') {
-        renderer.destroy();
-        process.exit(0);
-      }
-    });
+    line4.content = 'q: 終了';
+    onKey('q', () => quit());
   };
 
-  // ---- boot: try desktop token first ----
+  // ---- boot: env session, then desktop app session, then manual login ----
   const page = frame(renderer, '起動');
   const status = txt(renderer, 'Mattermost デスクトップアプリのセッションを確認中...', C.muted);
   page.add(status);
 
-  await new Promise((r) => setTimeout(r, 50));
-  const detectErrors: string[] = []
-  if (process.platform === 'darwin' && allDesktopServers().length > 0) {
-    for (const server of allDesktopServers()) {
-      status.content = `デスクトップアプリのセッション確認中... ${server}`;
-      const result = extractDesktopToken(server);
-      if (!result) continue;
-      if ('error' in result) {
-        detectErrors.push(`${server}: ${result.error}`);
-        continue;
-      }
-      const client = new Mattermost(server, result.token);
-      try {
-        const me = await client.verify();
-        status.content = `✓ トークンを検出: ${me.username} @ ${server}`;
-        status.fg = C.ok;
-        await new Promise((r2) => setTimeout(r2, 400));
-        await showChannels(client, `${me.username} @ ${server}`);
-        return;
-      } catch {
-        detectErrors.push(`${server}: セッションが無効です（デスクトップアプリで再ログインしてください）`);
-      }
+  await sleep(50); // let the first frame paint before keychain/sqlite work blocks the loop
+
+  const envServer = process.env.MMEX_SERVER;
+  const envToken = process.env.MMEX_TOKEN;
+  if (envServer && envToken) {
+    const client = new Mattermost(envServer, envToken);
+    const me = await client.me().catch(() => null);
+    if (me) {
+      await switchScreen(() => showChannels(client, `${me.username} @ ${envServer}`));
+      return;
     }
   }
-  const why = detectErrors.length ? detectErrors[0] : 'デスクトップアプリが見つかりません';
-  status.content = `✗ 自動検出失敗 → ID/パスワードでログインします`;
+
+  const session = await resolveDesktopSession();
+  if ('client' in session) {
+    status.content = `✓ トークンを検出: ${session.me.username} @ ${session.server}`;
+    status.fg = C.ok;
+    await sleep(400);
+    await switchScreen(() => showChannels(session.client, `${session.me.username} @ ${session.server}`));
+    return;
+  }
+  const why = session.errors[0] ?? 'デスクトップアプリが見つかりません';
+  status.content = '✗ 自動検出失敗 → ID/パスワードでログインします';
   status.fg = C.warn;
-  await new Promise((r) => setTimeout(r, 800));
-  showManual(`自動検出できませんでした — ${why}`);
+  await sleep(800);
+  await switchScreen(() => showManual(`自動検出できませんでした — ${why}`));
 }
