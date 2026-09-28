@@ -1,0 +1,16 @@
+{
+  "name": "mattermost-exporter",
+  "version": "0.1.0",
+  "description": "Mattermost channel exporter (JSON + attachments) with an OpenTUI interface",
+  "type": "module",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.1.11"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2"
+  }
+}
