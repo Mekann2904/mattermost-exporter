@@ -82,6 +82,12 @@ function fuzzyMatch(text: string, query: string): boolean {
   return false;
 }
 
+function openInFileManager(path: string): void {
+  const cmd =
+    process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open';
+  Bun.spawn([cmd, path], { stdout: 'ignore', stderr: 'ignore' });
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** One item every 2 rows: name + description (matches showDescription: true, no custom font). */
@@ -327,6 +333,7 @@ export async function runTui(outDir: string): Promise<void> {
     page.add(line3);
     page.add(line4);
 
+    let exportedDir: string | null = null;
     try {
       const summary = await exportChannel(client, ch.id, outDir, (p) => {
         if (p.phase === 'posts') {
@@ -338,6 +345,7 @@ export async function runTui(outDir: string): Promise<void> {
           line4.content = `  ${p.currentFile ?? ''} (${fmtBytes(p.bytes)})`;
         }
       });
+      exportedDir = summary.outDir;
       line1.content = `✓ 完了: ${formatSummary(summary)}`;
       line1.fg = C.ok;
       line2.content = `出力先: ${summary.outDir}`;
@@ -349,7 +357,11 @@ export async function runTui(outDir: string): Promise<void> {
       line1.content = `✗ エクスポート失敗: ${e instanceof Error ? e.message.slice(0, 120) : e}`;
       line1.fg = C.err;
     }
-    line4.content = 'q: 終了';
+    const openHint = process.platform === 'darwin' ? '↵ Finderで開く' : '↵ フォルダを開く';
+    line4.content = exportedDir ? `${openHint}   q 終了` : 'q: 終了';
+    onKey('return', () => {
+      if (exportedDir) openInFileManager(exportedDir);
+    });
     onKey('q', () => quit());
   };
 

@@ -1,6 +1,6 @@
 /** Channel export: JSON + attachments. Shared by the TUI and headless modes. */
 import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { Mattermost } from './mattermost';
 
 export interface ExportProgress {
@@ -49,7 +49,8 @@ export async function exportChannel(
 ): Promise<ExportSummary> {
   const channel = await mm.channel(channelId);
   const dirName = safeName(channel.display_name || channel.name || channelId);
-  const root = join(outDir, `${dirName}-${channel.id.slice(0, 8)}`);
+  // Absolute so every consumer (TUI, headless log, `open`) shows/uses the full path.
+  const root = resolve(join(outDir, `${dirName}-${channel.id.slice(0, 8)}`));
   const attDir = join(root, 'attachments');
   mkdirSync(attDir, { recursive: true });
 
