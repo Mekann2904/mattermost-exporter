@@ -45,17 +45,24 @@ function keychainPassword(): string | null {
   }
 }
 
-/** Try to extract the session token for `serverUrl` from the desktop app. Returns null on failure. */
-export function extractDesktopToken(serverUrl: string): string | null {
-  if (process.platform !== 'darwin') return null;
+export type DetectResult = { token: string } | { error: string };
+
+/** Try to extract the session token for `serverUrl` from the desktop app, with a reason on failure. */
+export function extractDesktopToken(serverUrl: string): DetectResult | null {
+  if (process.platform !== 'darwin') return null; // not macOS at all
   let host: string;
   try {
     host = new URL(serverUrl).host;
   } catch {
-    return null;
+    return { error: 'URLが不正です' };
   }
   const cookiesPath = join(APP_SUPPORT, 'Cookies');
-  if (!existsSync(cookiesPath)) return null;
+  if (!existsSync(join(APP_SUPPORT, 'config.json'))) {
+    return { error: 'Mattermostデスクトップアプリが見つかりません' };
+  }
+  if (!existsSync(cookiesPath)) {
+    return { error: 'デスクトップアプリのCookieがありません（一度ログインしてください）' };
+  }
 
   const tmp = join(tmpdir(), `mattermost-exporter-cookies-${process.pid}`);
   let data: Uint8Array | undefined;
@@ -70,25 +77,36 @@ export function extractDesktopToken(serverUrl: string): string | null {
     db.close();
     data = row?.encrypted_value ?? undefined;
   } catch {
-    return null;
+    return { error: 'Cookie DBの読み取りに失敗しました' };
   } finally {
     rmSync(tmp, { force: true });
   }
-  if (!data || data.length < 48) return null;
+  if (!data) {
+    return { error: `このサーバー(${host})のセッションCookieがありません。デスクトップアプリでログインしてください` };
+  }
+  if (data.length < 48) {
+    return { error: 'Cookieが短すぎます（デスクトップアプリで再ログインしてください）' };
+  }
 
   const pass = keychainPassword();
-  if (!pass) return null;
+  if (!pass) {
+    return {
+      error:
+        'Keychainから復号キーを取得できませんでした。「security」がKeychainにアクセスする許可ダイアログで「常に許可」を選んでください',
+    };
+  }
 
   try {
     const buf = Buffer.from(data);
-    if (buf.subarray(0, 3).toString() !== 'v10') return null;
+    if (buf.subarray(0, 3).toString() !== 'v10') return { error: '未知のCookie形式です' };
     const key = pbkdf2Sync(pass, 'saltysalt', 1003, 16, 'sha1');
     const decipher = createDecipheriv('aes-128-cbc', key, Buffer.alloc(16, 0x20));
     const pt = Buffer.concat([decipher.update(buf.subarray(3)), decipher.final()]);
     // plaintext: 32-byte host hash + token + PKCS7 padding
     const token = pt.subarray(32).toString('latin1').replace(/[\x01-\x10]+$/, '');
-    return /^[\x21-\x7e]{20,40}$/.test(token) ? token : null;
+    if (/^[\x21-\x7e]{20,40}$/.test(token)) return { token };
+    return { error: 'トークンの復号に失敗しました' };
   } catch {
-    return null;
+    return { error: '復号中にエラーが発生しました' };
   }
 }

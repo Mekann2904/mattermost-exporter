@@ -80,8 +80,8 @@ export async function runTui(outDir: string): Promise<void> {
   const showManual = (initialError?: string): void => {
     clearRoot(renderer);
     const page = frame(renderer, '接続設定');
-    page.add(txt(renderer, 'Mattermostサーバーとアクセストークンを入力してください', C.muted));
-    page.add(txt(renderer, 'トークン: Mattermost アカウント設定 → セキュリティ → パーソナルアクセストークン', C.muted));
+    if (initialError) page.add(txt(renderer, `⚠ ${initialError}`, C.warn));
+    page.add(txt(renderer, 'サーバー・ログインID・パスワードを入力してください（トークン不要）', C.muted));
 
     page.add(txt(renderer, 'サーバー URL:', C.text));
     const serverInput = new InputRenderable(renderer, {
@@ -94,49 +94,61 @@ export async function runTui(outDir: string): Promise<void> {
     if (servers[0]) serverInput.value = servers[0];
     page.add(serverInput);
 
-    page.add(txt(renderer, 'トークン:', C.text));
-    const tokenInput = new InputRenderable(renderer, {
+    page.add(txt(renderer, 'ログインID (メールアドレス or ユーザー名):', C.text));
+    const idInput = new InputRenderable(renderer, {
       width: 50,
-      placeholder: 'xxxxxxxxxxxxxxxxxxxxxxxxxx',
+      placeholder: 'e.g. you@example.com',
       textColor: C.text,
       focusedBackgroundColor: '#24283B',
     });
-    page.add(tokenInput);
+    page.add(idInput);
 
-    const status = txt(renderer, initialError ?? 'Enter で次へ ・ トークン入力後に Enter で接続', C.muted);
+    page.add(txt(renderer, 'パスワード:', C.text));
+    const passInput = new InputRenderable(renderer, {
+      width: 50,
+      placeholder: '********',
+      textColor: C.text,
+      focusedBackgroundColor: '#24283B',
+    });
+    page.add(passInput);
+
+    const status = txt(renderer, 'Enter で次へ ・ パスワード入力後に Enter でログイン', C.muted);
     page.add(status);
 
     serverInput.focus();
 
     const connect = async (): Promise<void> => {
       const server = String(serverInput.value ?? '').trim().replace(/\/+$/, '');
-      const token = String(tokenInput.value ?? '').trim();
+      const loginId = String(idInput.value ?? '').trim();
+      const password = String(passInput.value ?? '');
       if (!/^https?:\/\//.test(server)) {
         status.content = '✗ URL は https:// で始めてください';
         status.fg = C.err;
         return;
       }
-      if (token.length < 20) {
-        status.content = '✗ トークンが短すぎます';
+      if (!loginId || !password) {
+        status.content = '✗ ログインIDとパスワードを入力してください';
         status.fg = C.err;
         return;
       }
-      status.content = '接続中...';
+      status.content = 'ログイン中...';
       status.fg = C.warn;
-      const client = new Mattermost(server, token);
       try {
-        const me = await client.verify();
+        const { client, me } = await Mattermost.login(server, loginId, password);
         await showChannels(client, `${me.username} @ ${server}`);
       } catch (e) {
-        status.content = `✗ 接続失敗: ${e instanceof Error ? e.message.slice(0, 80) : e}`;
+        status.content = `✗ ログイン失敗: ${e instanceof Error ? e.message.slice(0, 90) : e}`;
         status.fg = C.err;
       }
     };
 
     serverInput.on(InputRenderableEvents.ENTER, () => {
-      tokenInput.focus();
+      idInput.focus();
     });
-    tokenInput.on(InputRenderableEvents.ENTER, () => {
+    idInput.on(InputRenderableEvents.ENTER, () => {
+      passInput.focus();
+    });
+    passInput.on(InputRenderableEvents.ENTER, () => {
       void connect();
     });
   };
@@ -233,11 +245,17 @@ export async function runTui(outDir: string): Promise<void> {
   page.add(status);
 
   await new Promise((r) => setTimeout(r, 50));
-  if (process.platform === 'darwin') {
+  const detectErrors: string[] = []
+  if (process.platform === 'darwin' && desktopServerList().length > 0) {
     for (const server of desktopServerList()) {
-      const token = extractDesktopToken(server);
-      if (!token) continue;
-      const client = new Mattermost(server, token);
+      status.content = `デスクトップアプリのセッション確認中... ${server}`;
+      const result = extractDesktopToken(server);
+      if (!result) continue;
+      if ('error' in result) {
+        detectErrors.push(`${server}: ${result.error}`);
+        continue;
+      }
+      const client = new Mattermost(server, result.token);
       try {
         const me = await client.verify();
         status.content = `✓ トークンを検出: ${me.username} @ ${server}`;
@@ -246,12 +264,13 @@ export async function runTui(outDir: string): Promise<void> {
         await showChannels(client, `${me.username} @ ${server}`);
         return;
       } catch {
-        // stale token; keep trying
+        detectErrors.push(`${server}: セッションが無効です（デスクトップアプリで再ログインしてください）`);
       }
     }
   }
-  status.content = '✗ デスクトップアプリのトークンが使えません。手動入力に進みます';
+  const why = detectErrors.length ? detectErrors[0] : 'デスクトップアプリが見つかりません';
+  status.content = `✗ 自動検出失敗 → ID/パスワードでログインします`;
   status.fg = C.warn;
-  await new Promise((r) => setTimeout(r, 600));
-  showManual();
+  await new Promise((r) => setTimeout(r, 800));
+  showManual(`自動検出できませんでした — ${why}`);
 }

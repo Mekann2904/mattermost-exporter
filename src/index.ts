@@ -96,11 +96,14 @@ async function headless(): Promise<void> {
   }
   let token = flags.token;
   if (!token && flags.autoToken) {
-    token = extractDesktopToken(server) ?? undefined;
-    if (!token) {
-      console.error('エラー: デスクトップアプリからトークンを検出できませんでした');
+    const r = extractDesktopToken(server);
+    if (!r || 'error' in r) {
+      console.error(
+        `エラー: トークン自動検出に失敗 — ${r && 'error' in r ? r.error : 'デスクトップアプリが見つかりません'}`,
+      );
       process.exit(1);
     }
+    token = r.token;
   }
   if (!token || !flags.channelId) {
     console.error('エラー: --token と --channel-id が必要です');
