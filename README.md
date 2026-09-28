@@ -4,11 +4,13 @@ Mattermost のチャンネルを、投稿と添付ファイルごとエクスポ
 
 ## 実行方法
 
-配布バイナリ（ランタイム同梱の単一実行ファイル）をダウンロードして、ターミナルで実行します。
+[Releases](https://github.com/Mekann2904/mattermost-exporter/releases) から `mattermost-exporter-darwin-arm64`（macOS / Apple Silicon、ランタイム同梱の単一実行ファイル）をダウンロードして実行します。インストールは不要です。
 
 ```sh
-./mattermost-exporter                  # 対話モードで起動
-./mattermost-exporter --out ~/exports  # 出力先を指定する場合
+chmod +x mattermost-exporter-darwin-arm64
+xattr -d com.apple.quarantine mattermost-exporter-darwin-arm64  # 初回のみ（Gatekeeper対策）
+./mattermost-exporter-darwin-arm64                  # 対話モードで起動
+./mattermost-exporter-darwin-arm64 --out ~/exports  # 出力先を指定する場合
 ```
 
 ## 対話モードの流れ
@@ -67,8 +69,8 @@ bun install          # 依存取得（グローバルキャッシュで2回目�
 bun src/index.ts     # TUI 実行
 bun x tsc --noEmit   # 型チェック
 
-# 配布用単一バイナリ生成
-bun build --compile src/index.ts --outfile dist/mattermost-exporter
+# 配布用単一バイナリ生成（「実行方法」のものと同名。リリース時はプラットフォーム名を付ける）
+bun build --compile src/index.ts --outfile dist/mattermost-exporter-darwin-arm64
 ```
 
 ## ライセンス
