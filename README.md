@@ -48,21 +48,15 @@ mattermost-exporter --auto-token \
 
 ```sh
 nix develop          # bun の入った開発シェル
+bun install          # 依存取得（グローバルキャッシュで2回目から高速）
 bun src/index.ts     # TUI 実行
 bun x tsc --noEmit   # 型チェック
 
-nix build            # 単一バイナリを ./result/bin/mattermost-exporter に生成
-nix run              # そのまま実行
+# 配布用単一バイナリ生成（Bunランタイム同梱・nix不要で誰でも実行可能）
+bun build --compile src/index.ts --outfile dist/mattermost-exporter
 ```
 
-`nix build` は `bun build --compile` で自己完結バイナリを生成します。依存は `bun.lock` → `bun.nix`（コミット）経由で [bun2nix](https://github.com/nix-community/bun2nix) が取得するため、ビルドは hermetic で `node_modules` は git管理外です。
-
-### 依存を更新するとき
-
-```sh
-nix develop -c bash -c 'bun install'                # package.json 変更
-nix run github:nix-community/bun2nix -- -o bun.nix  # bun.nix 再生成 → コミット
-```
+依存は `bun.lock` で固定します（コミット対象）。`node_modules` は git管理外。
 
 ## セキュリティについて
 
