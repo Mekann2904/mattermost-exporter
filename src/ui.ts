@@ -1,4 +1,4 @@
-/** OpenTUI interface: auth -> channel select -> export progress. */
+/** OpenTUI interface: desktop session -> channel select -> export progress. */
 import {
   BoxRenderable,
   TextRenderable,
@@ -10,10 +10,9 @@ import {
   type KeyEvent,
   type MouseEvent,
 } from '@opentui/core';
-import { Mattermost } from './mattermost';
-import type { Channel } from './mattermost';
+import type { Channel, Mattermost } from './mattermost';
 import { exportChannel, fmtBytes, type ExportSummary } from './exporter';
-import { desktopServerList, resolveDesktopSession } from './desktop';
+import { resolveDesktopSession } from './desktop';
 
 type Renderer = Awaited<ReturnType<typeof createCliRenderer>>;
 
@@ -130,80 +129,14 @@ export async function runTui(outDir: string): Promise<void> {
     renderer.destroy(); // exits via onDestroy once the terminal is restored
   };
 
-  const showManual = async (initialError?: string): Promise<void> => {
+  /** Terminal error screen: message + quit. Used when no session can be established. */
+  const showFatal = async (message: string): Promise<void> => {
     clearRoot(renderer);
-    const page = frame(renderer, '接続設定');
-    if (initialError) page.add(txt(renderer, `⚠ ${initialError}`, C.warn));
-    page.add(txt(renderer, 'サーバー・ログインID・パスワードを入力してください（トークン不要）', C.muted));
-
-    page.add(txt(renderer, 'サーバー URL:', C.text));
-    const serverInput = new InputRenderable(renderer, {
-      width: 50,
-      placeholder: 'https://mattermost.example.com',
-      textColor: C.text,
-      focusedBackgroundColor: '#24283B',
-    });
-    const servers = desktopServerList();
-    if (servers[0]) serverInput.value = servers[0];
-    page.add(serverInput);
-
-    page.add(txt(renderer, 'ログインID (メールアドレス or ユーザー名):', C.text));
-    const idInput = new InputRenderable(renderer, {
-      width: 50,
-      placeholder: 'e.g. you@example.com',
-      textColor: C.text,
-      focusedBackgroundColor: '#24283B',
-    });
-    page.add(idInput);
-
-    page.add(txt(renderer, 'パスワード:', C.text));
-    const passInput = new InputRenderable(renderer, {
-      width: 50,
-      placeholder: '********',
-      textColor: C.text,
-      focusedBackgroundColor: '#24283B',
-    });
-    page.add(passInput);
-
-    const status = txt(renderer, 'Enter で次へ ・ パスワード入力後に Enter でログイン', C.muted);
-    page.add(status);
-
-    serverInput.focus();
-
-    const connect = async (): Promise<void> => {
-      const server = String(serverInput.value ?? '').trim().replace(/\/+$/, '');
-      const loginId = String(idInput.value ?? '').trim();
-      const password = String(passInput.value ?? '');
-      if (!/^https?:\/\//.test(server)) {
-        status.content = '✗ URL は https:// で始めてください';
-        status.fg = C.err;
-        return;
-      }
-      if (!loginId || !password) {
-        status.content = '✗ ログインIDとパスワードを入力してください';
-        status.fg = C.err;
-        return;
-      }
-      status.content = 'ログイン中...';
-      status.fg = C.warn;
-      try {
-        const { client, me } = await Mattermost.login(server, loginId, password);
-        await switchScreen(() => showChannels(client, `${me.username} @ ${server}`));
-      } catch (e) {
-        status.content = `✗ ログイン失敗: ${e instanceof Error ? e.message.slice(0, 90) : e}`;
-        status.fg = C.err;
-      }
-    };
-
-    serverInput.on(InputRenderableEvents.ENTER, () => {
-      idInput.focus();
-    });
-    idInput.on(InputRenderableEvents.ENTER, () => {
-      passInput.focus();
-    });
-    passInput.on(InputRenderableEvents.ENTER, () => {
-      void connect();
-    });
+    const page = frame(renderer, 'エラー');
+    page.add(txt(renderer, `✗ ${message}`, C.err));
+    page.add(txt(renderer, 'Mattermost デスクトップアプリでログインしてから再実行してください', C.muted));
+    page.add(txt(renderer, 'q: 終了', C.muted));
+    onKey('q', () => quit());
   };
 
   const showChannels = async (client: Mattermost, who: string): Promise<void> => {
@@ -216,12 +149,11 @@ export async function runTui(outDir: string): Promise<void> {
     try {
       channels = await client.allChannels();
     } catch (e) {
-      await switchScreen(() => showManual(`✗ チャンネル取得失敗: ${e instanceof Error ? e.message.slice(0, 100) : e}`));
+      await switchScreen(() => showFatal(`チャンネル取得失敗: ${e instanceof Error ? e.message.slice(0, 100) : e}`));
       return;
     }
     if (!channels.length) {
-      identity.content = '✗ 参加しているチャンネルがありません';
-      identity.fg = C.err;
+      await switchScreen(() => showFatal('参加しているチャンネルがありません'));
       return;
     }
     channels.sort((a, b) => (b.last_post_at ?? 0) - (a.last_post_at ?? 0));
@@ -265,14 +197,12 @@ export async function runTui(outDir: string): Promise<void> {
       selectedBackgroundColor: C.accent,
       selectedTextColor: '#1A1B26',
       selectedDescriptionColor: '#343B55',
-      // Click an item to pick it (fzf-style); wheel scrolls the list.
+      // Click an item to highlight it; Enter confirms (same as ↑↓ then ↵). Wheel scrolls.
       onMouseUp: (event) => {
         if (event.button !== 0) return;
-        const row = Math.floor((event.y - select.screenY) / ITEM_ROWS);
-        const ch = filtered[scrollOffsetOf(select) + row];
-        if (!ch) return;
-        queryInput.focus(); // autoFocus moved focus to the select on mousedown; give it back
-        void switchScreen(() => showExport(client, ch));
+        const index = scrollOffsetOf(select) + Math.floor((event.y - select.screenY) / ITEM_ROWS);
+        if (index < 0 || index >= filtered.length) return;
+        select.setSelectedIndex(index);
       },
       onMouseScroll: (event) => {
         if (event.scroll?.direction === 'up') select.moveUp();
@@ -280,6 +210,10 @@ export async function runTui(outDir: string): Promise<void> {
       },
     });
     page.add(select);
+    // autoFocus (default on) focuses the Select on mousedown, which flashes its
+    // focusedBackgroundColor over the list. The list is driven by the global arrow
+    // handlers instead, so the Select must not take focus at all.
+    select.focusable = false;
 
     page.add(txt(renderer, '↑↓・クリック 選択   ↵ 決定', C.muted));
 
@@ -382,17 +316,6 @@ export async function runTui(outDir: string): Promise<void> {
 
   await sleep(50); // let the first frame paint before keychain/sqlite work blocks the loop
 
-  const envServer = process.env.MMEX_SERVER;
-  const envToken = process.env.MMEX_TOKEN;
-  if (envServer && envToken) {
-    const client = new Mattermost(envServer, envToken);
-    const me = await client.me().catch(() => null);
-    if (me) {
-      await switchScreen(() => showChannels(client, `${me.username} @ ${envServer}`));
-      return;
-    }
-  }
-
   const session = await resolveDesktopSession();
   if ('client' in session) {
     status.content = `✓ トークンを検出: ${session.me.username} @ ${session.server}`;
@@ -402,8 +325,8 @@ export async function runTui(outDir: string): Promise<void> {
     return;
   }
   const why = session.errors[0] ?? 'デスクトップアプリが見つかりません';
-  status.content = '✗ 自動検出失敗 → ID/パスワードでログインします';
+  status.content = '✗ 自動検出失敗';
   status.fg = C.warn;
   await sleep(800);
-  await switchScreen(() => showManual(`自動検出できませんでした — ${why}`));
+  await switchScreen(() => showFatal(why));
 }

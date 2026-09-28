@@ -40,7 +40,7 @@ function withCookieDb<T>(fn: (db: Database) => T): T | null {
 }
 
 /** Server URLs registered in the desktop app (supports both config v4 `servers` and legacy `teams`). */
-export function desktopServerList(): string[] {
+function desktopServerList(): string[] {
   const cfgPath = join(APP_SUPPORT, 'config.json');
   if (!existsSync(cfgPath)) return [];
   try {

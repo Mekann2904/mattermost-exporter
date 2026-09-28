@@ -58,23 +58,6 @@ export class Mattermost {
     this.server = server.replace(/\/+$/, '');
   }
 
-  /** Login with login_id + password (email or username). Returns a client + token. */
-  static async login(server: string, loginId: string, password: string): Promise<{ client: Mattermost; token: string; me: Me }> {
-    const base = server.replace(/\/+$/, '');
-    const res = await fetch(`${base}/api/v4/users/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ login_id: loginId, password }),
-    });
-    if (!res.ok) {
-      throw new ApiError('/api/v4/users/login', res.status, await res.text().catch(() => ''), 'POST');
-    }
-    const token = res.headers.get('token');
-    if (!token) throw new ApiError('/api/v4/users/login', res.status, 'no token header', 'POST');
-    const me = (await res.json()) as Me;
-    return { client: new Mattermost(base, token), token, me };
-  }
-
   private async api<T>(path: string, init: ApiInit = {}): Promise<T> {
     const res = await fetch(this.server + path, {
       method: 'GET',
