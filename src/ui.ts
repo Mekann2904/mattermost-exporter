@@ -107,19 +107,23 @@ export async function runTui(outDir: string): Promise<void> {
     onDestroy: () => process.exit(0),
   });
 
-  // Global key handlers belong to the current screen and are removed on every transition,
-  // so screens never see each other's keys and nothing accumulates.
-  let keyHandlers: Array<(key: KeyEvent) => void> = [];
+  // Screen-scoped resources (global key handlers, renderer listeners) are registered via
+  // onKey/onResize and removed on every transition, so screens never leak into each other.
+  let screenCleanups: Array<() => void> = [];
   const onKey = (name: string, fn: (key: KeyEvent) => void): void => {
     const handler = (key: KeyEvent): void => {
       if (key.name === name) fn(key);
     };
-    keyHandlers.push(handler);
     renderer.keyInput.on('keypress', handler);
+    screenCleanups.push(() => renderer.keyInput.off('keypress', handler));
+  };
+  const onResize = (fn: () => void): void => {
+    renderer.on('resize', fn);
+    screenCleanups.push(() => renderer.off('resize', fn));
   };
   const switchScreen = async (screen: () => Promise<void>): Promise<void> => {
-    for (const h of keyHandlers) renderer.keyInput.off('keypress', h);
-    keyHandlers = [];
+    for (const cleanup of screenCleanups) cleanup();
+    screenCleanups = [];
     await screen();
   };
   const quit = (): void => {
@@ -225,10 +229,9 @@ export async function runTui(outDir: string): Promise<void> {
 
     // fzf-style layout: "> query       N/M" prompt row, then the list, then a compact hint bar.
     // Chrome rows: frame border/padding (4) + identity (1) + prompt (1) + hint (1) + gaps (3).
-    const termRows = process.stdout.rows ?? 24;
-    const termCols = process.stdout.columns ?? 80;
-    const selectWidth = Math.min(70, termCols - 4);
-    const selectHeight = Math.max(4, termRows - 10);
+    // Size from the render canvas (not process.stdout) and refit on terminal resize.
+    const selectWidth = Math.min(70, renderer.width - 4);
+    const selectHeight = Math.max(4, renderer.height - 10);
 
     const optionOf = (ch: Channel) => ({
       name: `${typeBadge(ch)} ${ch.display_name || ch.name}`,
@@ -239,8 +242,7 @@ export async function runTui(outDir: string): Promise<void> {
     });
 
     // Prompt row: ">" + input + right-aligned match counter (padded to a fixed column).
-    const promptRow = new BoxRenderable(renderer, { flexDirection: 'row', width: selectWidth });
-    promptRow.add(txt(renderer, '> ', C.accent));
+    const promptRow = new BoxRenderable(renderer, { flexDirection: 'row', width: selectWidth });    promptRow.add(txt(renderer, '> ', C.accent));
     const queryInput = new InputRenderable(renderer, {
       width: selectWidth - 12,
       placeholder: '検索…',
@@ -280,6 +282,14 @@ export async function runTui(outDir: string): Promise<void> {
     page.add(select);
 
     page.add(txt(renderer, '↑↓・クリック 選択   ↵ 決定', C.muted));
+
+    onResize((): void => {
+      const w = Math.min(70, renderer.width - 4);
+      promptRow.width = w;
+      queryInput.width = w - 12;
+      select.width = w;
+      select.height = Math.max(4, renderer.height - 10);
+    });
 
     let filtered = channels;
 
