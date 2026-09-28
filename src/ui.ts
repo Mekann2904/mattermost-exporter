@@ -8,6 +8,7 @@ import {
   SelectRenderableEvents,
   createCliRenderer,
   type KeyEvent,
+  type MouseEvent,
 } from '@opentui/core';
 import { Mattermost } from './mattermost';
 import type { Channel } from './mattermost';
@@ -83,12 +84,22 @@ function fuzzyMatch(text: string, query: string): boolean {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-export async function runTui(outDir: string): Promise<void> {
-  const renderer = await createCliRenderer({ exitOnCtrlC: true });
+/** One item every 2 rows: name + description (matches showDescription: true, no custom font). */
+const ITEM_ROWS = 2;
 
-  // destroy() tears down renderables but does not stop the process (Ctrl+C / terminating
-  // signals); pending async work would then crash touching destroyed renderables. Exit cleanly.
-  renderer.on('destroy', () => process.exit(0));
+/** SelectRenderable keeps its scroll offset private; click-to-pick needs it to map a clicked row to an item. */
+const scrollOffsetOf = (s: SelectRenderable): number =>
+  (s as unknown as { scrollOffset?: number }).scrollOffset ?? 0;
+
+export async function runTui(outDir: string): Promise<void> {
+  // onDestroy runs at the very END of renderer teardown, after the native side has restored
+  // the terminal. Exiting earlier (e.g. on the 'destroy' event, which fires mid-teardown)
+  // cuts the restore short and leaves the last frame painted on screen. This also
+  // centralizes the exit for Ctrl+C, terminating signals, stdin EOF and the 'q' key.
+  const renderer = await createCliRenderer({
+    exitOnCtrlC: true,
+    onDestroy: () => process.exit(0),
+  });
 
   // Global key handlers belong to the current screen and are removed on every transition,
   // so screens never see each other's keys and nothing accumulates.
@@ -106,8 +117,7 @@ export async function runTui(outDir: string): Promise<void> {
     await screen();
   };
   const quit = (): void => {
-    renderer.destroy();
-    process.exit(0);
+    renderer.destroy(); // exits via onDestroy once the terminal is restored
   };
 
   const showManual = async (initialError?: string): Promise<void> => {
@@ -189,8 +199,8 @@ export async function runTui(outDir: string): Promise<void> {
   const showChannels = async (client: Mattermost, who: string): Promise<void> => {
     clearRoot(renderer);
     const page = frame(renderer, 'チャンネル選択');
-    const status = txt(renderer, `✓ ${who} — チャンネル一覧を取得中...`, C.ok);
-    page.add(status);
+    const identity = txt(renderer, `✓ ${who} — チャンネル一覧を取得中...`, C.ok);
+    page.add(identity);
 
     let channels: Channel[];
     try {
@@ -200,11 +210,19 @@ export async function runTui(outDir: string): Promise<void> {
       return;
     }
     if (!channels.length) {
-      status.content = '✗ 参加しているチャンネルがありません';
-      status.fg = C.err;
+      identity.content = '✗ 参加しているチャンネルがありません';
+      identity.fg = C.err;
       return;
     }
     channels.sort((a, b) => (b.last_post_at ?? 0) - (a.last_post_at ?? 0));
+    identity.content = `✓ ${who.replace(/^https?:\/\//, '')}`;
+
+    // fzf-style layout: "> query       N/M" prompt row, then the list, then a compact hint bar.
+    // Chrome rows: frame border/padding (4) + identity (1) + prompt (1) + hint (1) + gaps (3).
+    const termRows = process.stdout.rows ?? 24;
+    const termCols = process.stdout.columns ?? 80;
+    const selectWidth = Math.min(70, termCols - 4);
+    const selectHeight = Math.max(4, termRows - 10);
 
     const optionOf = (ch: Channel) => ({
       name: `${typeBadge(ch)} ${ch.display_name || ch.name}`,
@@ -214,22 +232,48 @@ export async function runTui(outDir: string): Promise<void> {
       value: ch.id,
     });
 
+    // Prompt row: ">" + input + right-aligned match counter (padded to a fixed column).
+    const promptRow = new BoxRenderable(renderer, { flexDirection: 'row', width: selectWidth });
+    promptRow.add(txt(renderer, '> ', C.accent));
     const queryInput = new InputRenderable(renderer, {
-      width: 68,
-      placeholder: '検索… (タイプで絞り込み)',
+      width: selectWidth - 12,
+      placeholder: '検索…',
       textColor: C.text,
       focusedBackgroundColor: '#24283B',
     });
-    page.add(queryInput);
+    promptRow.add(queryInput);
+    const counter = txt(renderer, '', C.muted);
+    promptRow.add(counter);
+    page.add(promptRow);
 
     const select = new SelectRenderable(renderer, {
-      width: 70,
-      height: 18,
+      width: selectWidth,
+      height: selectHeight,
       options: channels.map(optionOf),
       showDescription: true,
       showScrollIndicator: true,
+      textColor: C.text,
+      descriptionColor: C.muted,
+      selectedBackgroundColor: C.accent,
+      selectedTextColor: '#1A1B26',
+      selectedDescriptionColor: '#343B55',
+      // Click an item to pick it (fzf-style); wheel scrolls the list.
+      onMouseUp: (event) => {
+        if (event.button !== 0) return;
+        const row = Math.floor((event.y - select.screenY) / ITEM_ROWS);
+        const ch = filtered[scrollOffsetOf(select) + row];
+        if (!ch) return;
+        queryInput.focus(); // autoFocus moved focus to the select on mousedown; give it back
+        void switchScreen(() => showExport(client, ch));
+      },
+      onMouseScroll: (event) => {
+        if (event.scroll?.direction === 'up') select.moveUp();
+        else if (event.scroll?.direction === 'down') select.moveDown();
+      },
     });
     page.add(select);
+
+    page.add(txt(renderer, '↑↓・クリック 選択   ↵ 決定', C.muted));
 
     let filtered = channels;
 
@@ -238,7 +282,8 @@ export async function runTui(outDir: string): Promise<void> {
       filtered = channels.filter((ch) => fuzzyMatch(`${ch.display_name} ${ch.name}`, q));
       select.options = filtered.map(optionOf);
       select.setSelectedIndex(0);
-      status.content = `${filtered.length}/${channels.length} チャンネル — ↑↓ 選択、Enter 決定（入力欄でタイプして絞り込み）`;
+      counter.content = `${filtered.length}/${channels.length}`.padStart(10);
+      counter.fg = q ? C.accent : C.muted;
     };
 
     const confirm = (): void => {
@@ -250,7 +295,8 @@ export async function runTui(outDir: string): Promise<void> {
       }
     };
 
-    queryInput.on(InputRenderableEvents.CHANGE, applyFilter);
+    // INPUT fires on every keystroke (CHANGE only fires on blur/submit).
+    queryInput.on(InputRenderableEvents.INPUT, applyFilter);
     queryInput.on(InputRenderableEvents.ENTER, confirm);
     select.on(SelectRenderableEvents.ITEM_SELECTED, confirm);
 
