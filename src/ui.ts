@@ -11,7 +11,7 @@ import {
 import { Mattermost } from './mattermost';
 import type { Channel } from './mattermost';
 import { exportChannel, type ExportSummary } from './exporter';
-import { desktopServerList, extractDesktopToken } from './desktop';
+import { desktopServerList, extractDesktopToken, allDesktopServers } from './desktop';
 
 type Renderer = Awaited<ReturnType<typeof createCliRenderer>>;
 
@@ -246,8 +246,8 @@ export async function runTui(outDir: string): Promise<void> {
 
   await new Promise((r) => setTimeout(r, 50));
   const detectErrors: string[] = []
-  if (process.platform === 'darwin' && desktopServerList().length > 0) {
-    for (const server of desktopServerList()) {
+  if (process.platform === 'darwin' && allDesktopServers().length > 0) {
+    for (const server of allDesktopServers()) {
       status.content = `デスクトップアプリのセッション確認中... ${server}`;
       const result = extractDesktopToken(server);
       if (!result) continue;

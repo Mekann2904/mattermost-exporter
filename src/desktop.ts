@@ -18,19 +18,44 @@ export function isMacosDesktopInstalled(): boolean {
   return process.platform === 'darwin' && existsSync(join(APP_SUPPORT, 'config.json'));
 }
 
-/** Server URLs registered in the desktop app. */
+/** Server URLs registered in the desktop app (supports both config v4 `servers` and legacy `teams`). */
 export function desktopServerList(): string[] {
   const cfgPath = join(APP_SUPPORT, 'config.json');
   if (!existsSync(cfgPath)) return [];
   try {
     const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
-    const teams = Array.isArray(cfg?.teams) ? cfg.teams : [];
-    return teams
+    const list = Array.isArray(cfg?.servers) ? cfg.servers : Array.isArray(cfg?.teams) ? cfg.teams : [];
+    return list
       .map((t: { url?: string }) => (t.url ?? '').replace(/\/+$/, ''))
       .filter((u: string) => u.length > 0);
   } catch {
     return [];
   }
+}
+
+/** Fallback: hosts that have an MMAUTHTOKEN cookie (straight from the cookie DB). */
+export function cookieServerList(): string[] {
+  const cookiesPath = join(APP_SUPPORT, 'Cookies');
+  if (!existsSync(cookiesPath)) return [];
+  const tmp = join(tmpdir(), `mattermost-exporter-cookies-scan-${process.pid}`);
+  try {
+    copyFileSync(cookiesPath, tmp);
+    const db = new Database(tmp, { readonly: true });
+    const rows = db
+      .query(`SELECT DISTINCT host_key FROM cookies WHERE name='MMAUTHTOKEN'`)
+      .all() as { host_key: string }[];
+    db.close();
+    return rows.map((r) => `https://${r.host_key.replace(/^\./, '')}`);
+  } catch {
+    return [];
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+/** All candidate servers (config + cookies, deduplicated). */
+export function allDesktopServers(): string[] {
+  return [...new Set([...desktopServerList(), ...cookieServerList()])];
 }
 
 function keychainPassword(): string | null {
