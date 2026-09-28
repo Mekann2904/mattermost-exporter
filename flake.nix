@@ -12,7 +12,7 @@
         pkgs = import nixpkgs { inherit system; };
       in
       {
-        devShells.default = pkgs.mkShell {
+        devShells.default = pkgs.mkShellNoCC {
           packages = [ pkgs.bun ];
           shellHook = ''
             echo "mattermost-exporter dev shell"
