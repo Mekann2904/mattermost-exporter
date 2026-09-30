@@ -40,6 +40,15 @@ export interface Me {
   username: string;
 }
 
+/** A session row from /users/me/sessions (fields we use for diagnostics). */
+export interface SessionInfo {
+  id: string;
+  create_at: number;
+  expires_at: number;
+  last_activity_at: number;
+  props?: Record<string, string>;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly path: string,
@@ -73,6 +82,11 @@ export class Mattermost {
   /** Current user; throws (401 ApiError) when the token is invalid. */
   async me(): Promise<Me> {
     return this.api('/api/v4/users/me');
+  }
+
+  /** Active sessions of the current user (for diagnostics). */
+  async mySessions(): Promise<SessionInfo[]> {
+    return this.api('/api/v4/users/me/sessions');
   }
 
   async teams(): Promise<{ id: string; display_name: string; name: string }[]> {

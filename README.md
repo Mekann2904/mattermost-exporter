@@ -46,6 +46,7 @@ xattr -d com.apple.quarantine mattermost-exporter-darwin-arm64  # 初回のみ�
 | `--server URL` | サーバーURL（ヘッドレスモード） |
 | `--token TOKEN` | アクセストークン（ヘッドレスモード） |
 | `--auto-token` | デスクトップアプリからトークンを自動検出（macOS。`--server` と併用） |
+| `--doctor` | 自動検出の全段階（抽出・検証・サーバー側セッション期限）を診断表示 |
 | `--channel-id ID` | チャンネルID（ヘッドレスモード） |
 | `-h`, `--help` | ヘルプを表示 |
 

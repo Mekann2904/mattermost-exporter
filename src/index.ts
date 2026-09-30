@@ -10,6 +10,7 @@ import { runTui } from './ui';
 import { Mattermost } from './mattermost';
 import { exportChannel, fmtBytes } from './exporter';
 import { extractDesktopToken, describeVerifyFailure, maskToken } from './desktop';
+import { runDoctor } from './doctor';
 
 const HELP = `mattermost-exporter — Mattermost チャンネルエクスポート (JSON + 添付ファイル)
 
@@ -22,6 +23,7 @@ const HELP = `mattermost-exporter — Mattermost チャンネルエクスポー�
   --token TOKEN        アクセストークン (ヘッドレスモード)
   --channel-id ID      チャンネル ID (ヘッドレスモード)
   --auto-token         デスクトップアプリからトークン自動検出 (macOS, --server と併用)
+  --doctor             自動検出の全段階を診断表示 (抽出・検証・セッション期限)
   -h, --help           このヘルプ
 
 例:
@@ -46,6 +48,7 @@ interface Flags {
   token?: string;
   channelId?: string;
   autoToken?: boolean;
+  doctor?: boolean;
   help?: boolean;
 }
 
@@ -79,6 +82,7 @@ function parseArgs(argv: string[]): { flags: Flags; errors: string[] } {
   takeValue('token', (v) => (flags.token = v));
   takeValue('channel-id', (v) => (flags.channelId = v));
   flags.autoToken = takeBool('auto-token');
+  flags.doctor = takeBool('doctor');
   flags.help = takeBool('help');
   const h = args.indexOf('-h');
   if (h !== -1) {
@@ -155,6 +159,10 @@ if (errors.length) {
 }
 
 const outDir = flags.out ?? './mattermost-export';
+// Doctor reports and exits before anything else.
+if (flags.doctor) {
+  process.exit(await runDoctor());
+}
 // Any headless flag selects headless mode; missing ones are reported by headless() itself.
 const wantsHeadless = Boolean(flags.server || flags.token || flags.channelId || flags.autoToken);
 if (wantsHeadless) {
