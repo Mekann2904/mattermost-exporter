@@ -15,6 +15,26 @@ const APP_SUPPORT = join(homedir(), 'Library/Application Support/Mattermost');
 
 const iso = (ms: number): string => new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
 
+/** Server login methods from the public client config — explains why re-login needs the IdP. */
+async function loginMethods(server: string): Promise<string> {
+  try {
+    const r = await fetch(`${server}/api/v4/config/client?format=old`);
+    if (!r.ok) return `不明 (HTTP ${r.status})`;
+    const c = (await r.json()) as Record<string, unknown>;
+    const methods: [string, string][] = [
+      ['Email', 'EnableSignInWithEmail'],
+      ['Username', 'EnableSignInWithUsername'],
+      ['LDAP', 'EnableLdap'],
+      ['SAML', 'EnableSaml'],
+      ['GitLab', 'EnableSignUpWithGitLab'],
+    ];
+    const on = methods.filter(([, k]) => c[k] === true || c[k] === 'true').map(([n]) => n);
+    return on.length ? on.join(' / ') : '不明';
+  } catch {
+    return '不明';
+  }
+}
+
 export async function runDoctor(): Promise<number> {
   console.log(`platform: ${process.platform}`);
   if (process.platform !== 'darwin') {
@@ -34,6 +54,7 @@ export async function runDoctor(): Promise<number> {
   let ok: string | null = null;
   for (const server of servers) {
     console.log(`\n[${server}]`);
+    console.log(`  サーバーのログイン方式: ${await loginMethods(server)}`);
     const r = extractDesktopToken(server);
     if (!r) {
       console.log('  この環境では自動検出できません');
