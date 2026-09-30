@@ -1,0 +1,81 @@
+# Release pipeline: tag push (v*) -> test -> build single-file binaries -> GitHub Release.
+#
+# Binaries are built by CI with the official bun (never nix's), so they cannot
+# embed /nix/store ICU dependencies (the dyld failure documented in README).
+# darwin-arm64 and linux-x64 are built on their native runners and smoke-tested
+# (--help) before upload; the two cross-compiled targets embed the same official
+# bun runtime, only for another arch.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run typecheck
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: bun-darwin-arm64
+            name: mattermost-exporter-darwin-arm64
+            smoke: true
+          - os: macos-latest
+            target: bun-darwin-x64
+            name: mattermost-exporter-darwin-x64
+            smoke: false
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            name: mattermost-exporter-linux-x64
+            smoke: true
+          - os: ubuntu-latest
+            target: bun-linux-arm64
+            name: mattermost-exporter-linux-arm64
+            smoke: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      # Cross-compiling needs the target platform's native module (@opentui/core-<os>-<arch>),
+      # which bun only installs for the host platform by default.
+      - run: bun install --frozen-lockfile --os='*' --cpu='*'
+      - run: bun build --compile --target=${{ matrix.target }} src/index.ts --outfile dist/${{ matrix.name }}
+      - run: ./dist/${{ matrix.name }} --help
+        if: matrix.smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            --verify-tag \
+          || gh release upload "${{ github.ref_name }}" dist/* --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

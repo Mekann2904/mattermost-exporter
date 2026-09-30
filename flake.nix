@@ -16,10 +16,14 @@
           packages = [ pkgs.bun ];
           shellHook = ''
             echo "mattermost-exporter dev shell"
-            echo "  bun install                                              # deps (2回目からはキャッシュで高速)"
-            echo "  bun src/index.ts                                        # run TUI"
-            echo "  bun x tsc --noEmit                                      # typecheck"
-            echo "  bun build --compile src/index.ts --outfile dist/mattermost-exporter   # 単一バイナリ"
+            echo "  bun install        # deps (2回目からはキャッシュで高速)"
+            echo "  bun src/index.ts   # run TUI"
+            echo "  bun test           # tests"
+            echo "  bun run typecheck  # typecheck"
+            echo ""
+            echo "  注意: 配布用バイナリは CI がビルドする (.github/workflows/release.yml)。"
+            echo "  nix の bun で bun build --compile すると /nix/store の ICU が埋め込まれ、"
+            echo "  nix のない環境で dyld エラーになるため配布には使わないこと。"
           '';
         };
       });

@@ -4,11 +4,18 @@ Mattermost のチャンネルを、投稿と添付ファイルごとエクスポ
 
 ## 実行方法
 
-[Releases](https://github.com/Mekann2904/mattermost-exporter/releases) から `mattermost-exporter-darwin-arm64`（macOS / Apple Silicon、ランタイム同梱の単一実行ファイル）をダウンロードして実行します。インストールは不要です。
+[Releases](https://github.com/Mekann2904/mattermost-exporter/releases) から自分の環境に合うバイナリをダウンロードして実行します（ランタイム同梱の単一実行ファイル）。インストールは不要です。対話モードは macOS 専用で、Linux ではヘッドレスモード（`--token`）を使います。
+
+| バイナリ | 環境 |
+| --- | --- |
+| `mattermost-exporter-darwin-arm64` | macOS / Apple Silicon（対話モード対応） |
+| `mattermost-exporter-darwin-x64` | macOS / Intel（対話モード対応） |
+| `mattermost-exporter-linux-x64` | Linux x86_64（ヘッドレスモード） |
+| `mattermost-exporter-linux-arm64` | Linux arm64（ヘッドレスモード） |
 
 ```sh
 chmod +x mattermost-exporter-darwin-arm64
-xattr -d com.apple.quarantine mattermost-exporter-darwin-arm64  # 初回のみ（Gatekeeper対策）
+xattr -d com.apple.quarantine mattermost-exporter-darwin-arm64  # 初回のみ・macOS (Gatekeeper対策)
 ./mattermost-exporter-darwin-arm64                  # 対話モードで起動
 ./mattermost-exporter-darwin-arm64 --out ~/exports  # 出力先を指定する場合
 ```
@@ -20,6 +27,7 @@ xattr -d com.apple.quarantine mattermost-exporter-darwin-arm64  # 初回のみ�
 ### ログイン
 
 - **macOS + Mattermost デスクトップアプリ**：ログイン済みセッションを自動検出します（初回のみ macOS の許可ダイアログが出ます。その場で「常に許可」を選ぶと次回から出ません）
+- **Linux**：対話モードは使えないため、ヘッドレスモード（`--server` + `--token`）を使用してください
 
 
 ## 出力されるもの
@@ -61,19 +69,22 @@ mattermost-exporter \
 
 - トークン自動検出はローカルのデスクトップアプリのセッションCookie（Keychainで暗号化されたもの）を使用します。
 
-## 開発（nix）
+## 開発
+
+bun があれば nix は不要です:
 
 ```sh
-nix develop          # bun の入った開発シェル
-bun install          # 依存取得（グローバルキャッシュで2回目から高速）
-bun src/index.ts     # TUI 実行
-bun x tsc --noEmit   # 型チェック
-
-# 配布用単一バイナリ生成（「実行方法」のものと同名。リリース時はプラットフォーム名を付ける）
-# 注意: nix の bun でビルドすると /nix/store の ICU への依存が埋め込まれ、
-# nix のない環境で dyld エラーになる。配布用は nix 外の bun (~/.bun 等) でビルドすること
-bun build --compile src/index.ts --outfile dist/mattermost-exporter-darwin-arm64
+bun install           # 依存取得
+bun test              # 単体テスト
+bun run typecheck     # 型チェック
+bun src/index.ts      # TUI 実行
 ```
+
+nix がある場合は `nix develop` で bun の入った開発シェルに入れます（flake.nix）。
+
+### リリースビルド
+
+配布用バイナリは CI が `v*` タグの push で自動ビルドして Release にアップロードします（darwin-arm64 / darwin-x64 / linux-x64 / linux-arm64。`.github/workflows/release.yml`）。ローカルでの `bun build --compile` は開発確認用に留めてください — nix の bun でビルドすると `/nix/store` の ICU 依存が埋め込まれ、nix のない環境で dyld エラーになるため配布には使えません。
 
 ## ライセンス
 
