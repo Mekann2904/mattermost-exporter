@@ -3,10 +3,12 @@
  *
  * The Electron app stores an MMAUTHTOKEN cookie in its Chromium cookie DB,
  * encrypted with a key derived (PBKDF2) from the "Mattermost Safe Storage"
- * password in the macOS Keychain. Plaintext layout (AES-128-CBC, IV=spaces):
- *   sha256(host_key)[32 bytes] + token + PKCS7 padding
+ * password in the macOS Keychain (AES-128-CBC, IV = 16 spaces).
+ * Decrypted plaintext comes in two layouts, depending on desktop app version:
+ *   new: sha256(host_key)[32 bytes] + token + PKCS7 padding  (cookie integrity MAC)
+ *   old: token + PKCS7 padding
  */
-import { pbkdf2Sync, createDecipheriv } from 'node:crypto';
+import { pbkdf2Sync, createDecipheriv, createHash } from 'node:crypto';
 import { Database } from 'bun:sqlite';
 import { existsSync, copyFileSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -81,6 +83,30 @@ function keychainPassword(): string | null {
 
 export type DetectResult = { token: string } | { error: string };
 
+/** Mattermost セッショントークンの形 (通常26文字の印字可能ASCII) */
+const TOKEN_RE = /^[\x21-\x7e]{20,40}$/;
+
+/**
+ * Decrypt an MMAUTHTOKEN cookie value. Handles both desktop app generations:
+ * with and without the 32-byte sha256(host_key) integrity prefix.
+ * Returns the token, or null when it does not look like a token.
+ */
+export function decryptMmAuthCookie(data: Buffer, hostKey: string, pass: string): string | null {
+  try {
+    const buf = Buffer.from(data);
+    if (buf.subarray(0, 3).toString() !== 'v10') return null;
+    const key = pbkdf2Sync(pass, 'saltysalt', 1003, 16, 'sha1');
+    const decipher = createDecipheriv('aes-128-cbc', key, Buffer.alloc(16, 0x20));
+    const pt = Buffer.concat([decipher.update(buf.subarray(3)), decipher.final()]);
+    const mac = createHash('sha256').update(Buffer.from(hostKey, 'latin1')).digest();
+    const body = pt.length >= 32 && pt.subarray(0, 32).equals(mac) ? pt.subarray(32) : pt;
+    const token = body.toString('latin1').replace(/[\x01-\x10]+$/, '');
+    return TOKEN_RE.test(token) ? token : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Try to extract the session token for `serverUrl` from the desktop app, with a reason on failure. */
 export function extractDesktopToken(serverUrl: string): DetectResult | null {
   if (process.platform !== 'darwin') return null; // not macOS at all
@@ -99,18 +125,19 @@ export function extractDesktopToken(serverUrl: string): DetectResult | null {
 
   const row = withCookieDb((db) =>
     db
-      .query(`SELECT encrypted_value FROM cookies WHERE name='MMAUTHTOKEN' AND host_key LIKE ? LIMIT 1`)
-      .get(`%${host}`) as { encrypted_value?: Uint8Array } | null,
+      .query(
+        `SELECT host_key, encrypted_value FROM cookies
+         WHERE name='MMAUTHTOKEN' AND host_key IN (?, ?)
+         ORDER BY creation_utc DESC LIMIT 1`,
+      )
+      .get(host, `.${host}`) as { host_key: string; encrypted_value?: Uint8Array } | null,
   );
   if (row === null) return { error: 'Cookie DBの読み取りに失敗しました' };
-  const data = row.encrypted_value;
+  const data = row.encrypted_value && row.encrypted_value.length > 0 ? Buffer.from(row.encrypted_value) : null;
   if (!data) {
     return {
       error: `このサーバー(${host})のセッションCookieがありません。デスクトップアプリでログインしてください`,
     };
-  }
-  if (data.length < 48) {
-    return { error: 'Cookieが短すぎます（デスクトップアプリで再ログインしてください）' };
   }
 
   const pass = keychainPassword();
@@ -121,19 +148,9 @@ export function extractDesktopToken(serverUrl: string): DetectResult | null {
     };
   }
 
-  try {
-    const buf = Buffer.from(data);
-    if (buf.subarray(0, 3).toString() !== 'v10') return { error: '未知のCookie形式です' };
-    const key = pbkdf2Sync(pass, 'saltysalt', 1003, 16, 'sha1');
-    const decipher = createDecipheriv('aes-128-cbc', key, Buffer.alloc(16, 0x20));
-    const pt = Buffer.concat([decipher.update(buf.subarray(3)), decipher.final()]);
-    // plaintext: 32-byte host hash + token + PKCS7 padding
-    const token = pt.subarray(32).toString('latin1').replace(/[\x01-\x10]+$/, '');
-    if (/^[\x21-\x7e]{20,40}$/.test(token)) return { token };
-    return { error: 'トークンの復号に失敗しました' };
-  } catch {
-    return { error: '復号中にエラーが発生しました' };
-  }
+  const token = decryptMmAuthCookie(data, row.host_key, pass);
+  if (token) return { token };
+  return { error: `トークンの復号に失敗しました (形式=${data.subarray(0, 3).toString()}, ${data.length}バイト)` };
 }
 
 export interface DesktopSession {

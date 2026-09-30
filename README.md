@@ -70,6 +70,8 @@ bun src/index.ts     # TUI 実行
 bun x tsc --noEmit   # 型チェック
 
 # 配布用単一バイナリ生成（「実行方法」のものと同名。リリース時はプラットフォーム名を付ける）
+# 注意: nix の bun でビルドすると /nix/store の ICU への依存が埋め込まれ、
+# nix のない環境で dyld エラーになる。配布用は nix 外の bun (~/.bun 等) でビルドすること
 bun build --compile src/index.ts --outfile dist/mattermost-exporter-darwin-arm64
 ```
 
