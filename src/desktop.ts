@@ -20,12 +20,12 @@ const APP_SUPPORT = join(homedir(), 'Library/Application Support/Mattermost');
 /**
  * Run a read-only query against a private copy of the desktop cookie DB
  * (the live DB may be locked by the running app).
- * Returns undefined when the DB is missing or unreadable (null is reserved
- * for sqlite's "no row" so the two failures stay distinguishable).
+ * Throws when the DB is missing or unreadable; `.get()`'s null ("no row")
+ * passes through untouched, keeping technical failure and absence distinct.
  */
-function withCookieDb<T>(fn: (db: Database) => T): T | undefined {
+function withCookieDb<T>(fn: (db: Database) => T): T {
   const src = join(APP_SUPPORT, 'Cookies');
-  if (!existsSync(src)) return undefined;
+  if (!existsSync(src)) throw new Error('Cookie DB not found');
   const tmp = join(tmpdir(), `mattermost-exporter-cookies-${process.pid}`);
   try {
     copyFileSync(src, tmp);
@@ -35,8 +35,6 @@ function withCookieDb<T>(fn: (db: Database) => T): T | undefined {
     } finally {
       db.close();
     }
-  } catch {
-    return undefined;
   } finally {
     rmSync(tmp, { force: true });
   }
@@ -59,12 +57,16 @@ function desktopServerList(): string[] {
 
 /** Fallback: hosts that have an MMAUTHTOKEN cookie (straight from the cookie DB). */
 export function cookieServerList(): string[] {
-  const rows = withCookieDb((db) =>
-    db.query(`SELECT DISTINCT host_key FROM cookies WHERE name='MMAUTHTOKEN'`).all() as {
-      host_key: string;
-    }[],
-  );
-  return rows ? rows.map((r) => `https://${r.host_key.replace(/^\./, '')}`) : [];
+  try {
+    const rows = withCookieDb((db) =>
+      db.query(`SELECT DISTINCT host_key FROM cookies WHERE name='MMAUTHTOKEN'`).all() as {
+        host_key: string;
+      }[],
+    );
+    return rows.map((r) => `https://${r.host_key.replace(/^\./, '')}`);
+  } catch {
+    return [];
+  }
 }
 
 /** All candidate servers (config + cookies, deduplicated). */
@@ -108,12 +110,20 @@ export function decryptMmAuthCookie(data: Buffer, hostKey: string, pass: string)
   }
 }
 
+/** An MMAUTHTOKEN cookie row from the desktop app's Chromium cookie DB. */
+interface CookieRow {
+  host_key: string;
+  /** NULL when the column is empty (not logged in on this host). */
+  encrypted_value: Uint8Array | null;
+}
+
 /** Try to extract the session token for `serverUrl` from the desktop app, with a reason on failure. */
 export function extractDesktopToken(serverUrl: string): DetectResult | null {
   if (process.platform !== 'darwin') return null; // not macOS at all
   let host: string;
   try {
-    host = new URL(serverUrl).host;
+    // hostname, not host: Chromium's cookies.host_key never carries a port
+    host = new URL(serverUrl).hostname;
   } catch {
     return { error: 'URLが不正です' };
   }
@@ -124,18 +134,21 @@ export function extractDesktopToken(serverUrl: string): DetectResult | null {
     return { error: 'デスクトップアプリのCookieがありません（一度ログインしてください）' };
   }
 
-  const row = withCookieDb((db) =>
-    db
-      .query(
-        `SELECT host_key, encrypted_value FROM cookies
-         WHERE name='MMAUTHTOKEN' AND host_key IN (?, ?)
-         ORDER BY creation_utc DESC LIMIT 1`,
-      )
-      .get(host, `.${host}`) as { host_key: string; encrypted_value?: Uint8Array } | null,
-  );
-  if (row === undefined) return { error: 'Cookie DBの読み取りに失敗しました' };
-  const data = row && row.encrypted_value && row.encrypted_value.length > 0 ? Buffer.from(row.encrypted_value) : null;
-  if (!row || !data) {
+  let row: CookieRow | null;
+  try {
+    row = withCookieDb((db) =>
+      db
+        .query(
+          `SELECT host_key, encrypted_value FROM cookies
+           WHERE name='MMAUTHTOKEN' AND host_key IN (?, ?)
+           ORDER BY creation_utc DESC LIMIT 1`,
+        )
+        .get(host, `.${host}`) as CookieRow | null,
+    );
+  } catch (e) {
+    return { error: `Cookie DBの読み取りに失敗しました (${e instanceof Error ? e.message : e})` };
+  }
+  if (!row?.encrypted_value?.length) {
     return {
       error: `このサーバー(${host})のセッションCookieがありません。デスクトップアプリでログインしてください`,
     };
@@ -149,6 +162,7 @@ export function extractDesktopToken(serverUrl: string): DetectResult | null {
     };
   }
 
+  const data = Buffer.from(row.encrypted_value);
   const token = decryptMmAuthCookie(data, row.host_key, pass);
   if (token) return { token };
   return { error: `トークンの復号に失敗しました (形式=${data.subarray(0, 3).toString()}, ${data.length}バイト)` };
