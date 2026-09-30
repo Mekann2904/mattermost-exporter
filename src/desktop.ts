@@ -20,11 +20,12 @@ const APP_SUPPORT = join(homedir(), 'Library/Application Support/Mattermost');
 /**
  * Run a read-only query against a private copy of the desktop cookie DB
  * (the live DB may be locked by the running app).
- * Returns null when the DB is missing or unreadable.
+ * Returns undefined when the DB is missing or unreadable (null is reserved
+ * for sqlite's "no row" so the two failures stay distinguishable).
  */
-function withCookieDb<T>(fn: (db: Database) => T): T | null {
+function withCookieDb<T>(fn: (db: Database) => T): T | undefined {
   const src = join(APP_SUPPORT, 'Cookies');
-  if (!existsSync(src)) return null;
+  if (!existsSync(src)) return undefined;
   const tmp = join(tmpdir(), `mattermost-exporter-cookies-${process.pid}`);
   try {
     copyFileSync(src, tmp);
@@ -35,7 +36,7 @@ function withCookieDb<T>(fn: (db: Database) => T): T | null {
       db.close();
     }
   } catch {
-    return null;
+    return undefined;
   } finally {
     rmSync(tmp, { force: true });
   }
@@ -132,9 +133,9 @@ export function extractDesktopToken(serverUrl: string): DetectResult | null {
       )
       .get(host, `.${host}`) as { host_key: string; encrypted_value?: Uint8Array } | null,
   );
-  if (row === null) return { error: 'Cookie DBの読み取りに失敗しました' };
-  const data = row.encrypted_value && row.encrypted_value.length > 0 ? Buffer.from(row.encrypted_value) : null;
-  if (!data) {
+  if (row === undefined) return { error: 'Cookie DBの読み取りに失敗しました' };
+  const data = row && row.encrypted_value && row.encrypted_value.length > 0 ? Buffer.from(row.encrypted_value) : null;
+  if (!row || !data) {
     return {
       error: `このサーバー(${host})のセッションCookieがありません。デスクトップアプリでログインしてください`,
     };
