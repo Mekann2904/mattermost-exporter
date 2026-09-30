@@ -1,6 +1,6 @@
 {
   "name": "mattermost-exporter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Mattermost channel exporter (JSON + attachments) with an OpenTUI interface",
   "type": "module",
   "scripts": {
