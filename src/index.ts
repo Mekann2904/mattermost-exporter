@@ -9,7 +9,7 @@
 import { runTui } from './ui';
 import { Mattermost } from './mattermost';
 import { exportChannel, fmtBytes } from './exporter';
-import { extractDesktopToken } from './desktop';
+import { extractDesktopToken, describeVerifyFailure, maskToken } from './desktop';
 
 const HELP = `mattermost-exporter — Mattermost チャンネルエクスポート (JSON + 添付ファイル)
 
@@ -119,7 +119,8 @@ async function headless(flags: Flags, outDir: string): Promise<void> {
 
   const client = new Mattermost(server, resolved);
   const me = await client.me().catch((e) => {
-    console.error(`エラー: 接続失敗 — ${e instanceof Error ? e.message : e}`);
+    console.error(`エラー: ${describeVerifyFailure(e)}`);
+    if (flags.autoToken) console.error(`  自動検出トークン: ${maskToken(resolved)}`);
     process.exit(1);
   });
   console.log(`接続: ${me.username} @ ${server}`);

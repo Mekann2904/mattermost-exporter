@@ -129,12 +129,11 @@ export async function runTui(outDir: string): Promise<void> {
     renderer.destroy(); // exits via onDestroy once the terminal is restored
   };
 
-  /** Terminal error screen: message + quit. Used when no session can be established. */
-  const showFatal = async (message: string): Promise<void> => {
+  /** Terminal error screen: messages + quit. Used when no session can be established. */
+  const showFatal = async (messages: string[]): Promise<void> => {
     clearRoot(renderer);
     const page = frame(renderer, 'エラー');
-    page.add(txt(renderer, `✗ ${message}`, C.err));
-    page.add(txt(renderer, 'Mattermost デスクトップアプリでログインしてから再実行してください', C.muted));
+    for (const m of messages) page.add(txt(renderer, `✗ ${m}`, C.err));
     page.add(txt(renderer, 'q: 終了', C.muted));
     onKey('q', () => quit());
   };
@@ -149,11 +148,13 @@ export async function runTui(outDir: string): Promise<void> {
     try {
       channels = await client.allChannels();
     } catch (e) {
-      await switchScreen(() => showFatal(`チャンネル取得失敗: ${e instanceof Error ? e.message.slice(0, 100) : e}`));
+      await switchScreen(() =>
+        showFatal([`チャンネル取得失敗: ${e instanceof Error ? e.message.slice(0, 100) : e}`]),
+      );
       return;
     }
     if (!channels.length) {
-      await switchScreen(() => showFatal('参加しているチャンネルがありません'));
+      await switchScreen(() => showFatal(['参加しているチャンネルがありません']));
       return;
     }
     channels.sort((a, b) => (b.last_post_at ?? 0) - (a.last_post_at ?? 0));
@@ -324,7 +325,7 @@ export async function runTui(outDir: string): Promise<void> {
     await switchScreen(() => showChannels(session.client, `${session.me.username} @ ${session.server}`));
     return;
   }
-  const why = session.errors[0] ?? 'デスクトップアプリが見つかりません';
+  const why = session.errors.length ? session.errors : ['デスクトップアプリが見つかりません'];
   status.content = '✗ 自動検出失敗';
   status.fg = C.warn;
   await sleep(800);

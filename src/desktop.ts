@@ -13,7 +13,7 @@ import { Database } from 'bun:sqlite';
 import { existsSync, copyFileSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Mattermost, type Me } from './mattermost';
+import { Mattermost, ApiError, type Me } from './mattermost';
 
 const APP_SUPPORT = join(homedir(), 'Library/Application Support/Mattermost');
 
@@ -174,6 +174,21 @@ export interface DesktopSession {
   me: Me;
 }
 
+/** Session-token prefix for correlating with the server's session list (Sessions.Id). */
+export const maskToken = (t: string): string => `${t.slice(0, 6)}…`;
+
+/**
+ * Classify a /users/me failure: an auth rejection (401/403) means the token is
+ * really dead, anything else (network, TLS, proxy, 5xx) is a transport problem
+ * that re-logging-in will never fix.
+ */
+export function describeVerifyFailure(e: unknown): string {
+  if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+    return `セッションが無効です (HTTP ${e.status})。デスクトップアプリで再ログインしてください`;
+  }
+  return `サーバーに接続できません (${e instanceof Error ? e.message : e})。ネットワーク・証明書・プロキシを確認してください`;
+}
+
 /**
  * First desktop-app session that actually verifies against its server,
  * or the per-server failure reasons when none do.
@@ -191,8 +206,8 @@ export async function resolveDesktopSession(): Promise<DesktopSession | { errors
     try {
       const me = await client.me();
       return { server, client, me };
-    } catch {
-      errors.push(`${server}: セッションが無効です（デスクトップアプリで再ログインしてください）`);
+    } catch (e) {
+      errors.push(`${server}: ${describeVerifyFailure(e)} [トークン ${maskToken(r.token)}]`);
     }
   }
   return { errors };
